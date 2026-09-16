@@ -1,0 +1,138 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: pg-oltp
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+      - -c
+      - track_commit_timestamp=on
+    environment:
+      POSTGRES_DB: shop
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d shop"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: ch-olap
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - chdata:/var/lib/clickhouse
+      - ./clickhouse:/docker-entrypoint-initdb.d:ro
+    environment:
+      CLICKHOUSE_DB: shop
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep -q Ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  cdc-worker:
+    build: ./services/cdc
+    container_name: cdc-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: shop
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      CH_HOST: clickhouse
+      CH_PORT: "8123"
+      CH_DATABASE: shop
+      CH_USER: default
+      CH_PASSWORD: ""
+      SNAPSHOT_ON_START: "1"
+      POLL_MS: "500"
+      BATCH_SIZE: "2000"
+    restart: unless-stopped
+
+  generator:
+    build: ./services/generator
+    container_name: data-generator
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: shop
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      SEED_CUSTOMERS: "5000"
+      SEED_PRODUCTS: "500"
+      SEED_ORDERS: "30000"
+      OPS_PER_SEC: "120"
+      UPDATE_RATIO: "0.35"
+      DELETE_RATIO: "0.05"
+    restart: unless-stopped
+
+  benchmark:
+    build: ./services/benchmark
+    container_name: benchmark
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      cdc-worker:
+        condition: service_started
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: shop
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      CH_HOST: clickhouse
+      CH_PORT: "8123"
+      CH_DATABASE: shop
+      CH_USER: default
+      CH_PASSWORD: ""
+      MIN_ORDERS: "20000"
+      WAIT_TIMEOUT_SEC: "600"
+    volumes:
+      - ./results:/results
+    restart: "no"
+
+  dashboard:
+    build: ./services/dashboard
+    container_name: dashboard
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      CH_HOST: clickhouse
+      CH_PORT: "8123"
+      CH_DATABASE: shop
+      CH_USER: default
+      CH_PASSWORD: ""
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  chdata:
